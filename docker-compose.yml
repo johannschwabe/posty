@@ -1,6 +1,6 @@
 services:
   posty:
-    image: posty:latest
+    image: localhost:5000/posty:latest
     env_file: .env
     environment:
       DATA_DIR: /data

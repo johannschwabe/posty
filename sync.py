@@ -30,11 +30,15 @@ SESSION_FILE = _data_dir / "session.json"
 STATE_FILE = _data_dir / "synced_letters.json"
 
 def _launch_opts() -> dict:
-    """Use system Chromium if found (needed when Playwright's bundled build doesn't support the OS)."""
+    """Use system Chromium if found. Adds --no-sandbox when running inside Docker."""
+    opts = {}
     for name in ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome"):
         if path := shutil.which(name):
-            return {"executable_path": path}
-    return {}
+            opts["executable_path"] = path
+            break
+    if Path("/.dockerenv").exists():
+        opts["args"] = ["--no-sandbox"]
+    return opts
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
