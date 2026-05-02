@@ -76,6 +76,8 @@ async def _do_sync(*, manual: bool) -> str | None:
         if "expired" in str(e).lower():
             return "⚠️ ePost session expired. Run `python sync.py login` to re-authenticate."
         return f"❌ Sync failed: {e}"
+    except Exception as e:
+        return f"❌ Unexpected error: {type(e).__name__}: {e}"
 
     return _format_result(new_letters, errors, manual=manual)
 

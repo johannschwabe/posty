@@ -36,8 +36,12 @@ def _launch_opts() -> dict:
         if path := shutil.which(name):
             opts["executable_path"] = path
             break
-    if Path("/.dockerenv").exists():
+    in_docker = Path("/.dockerenv").exists()
+    if in_docker:
         opts["args"] = ["--no-sandbox", "--disable-dev-shm-usage"]
+    if in_docker and "executable_path" not in opts:
+        raise RuntimeError("No Chromium found in container. Install chromium via apt.")
+    print(f"Chromium: {opts.get('executable_path', 'playwright-bundled')} args={opts.get('args', [])}")
     return opts
 
 # ── State ─────────────────────────────────────────────────────────────────────
