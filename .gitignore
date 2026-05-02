@@ -4,3 +4,10 @@ synced_letters.json
 downloads/
 __pycache__/
 .venv/
+.idea/
+.playwright-mcp/
+*.ipa
+entitlements.plist
+plist
+xml
+ssl-bypass.js
