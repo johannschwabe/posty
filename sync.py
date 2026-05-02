@@ -185,15 +185,20 @@ def run_sync() -> tuple[list[dict], list[str]]:
     new_letters: list[dict] = []
     errors: list[str] = []
 
+    opts = _launch_opts()
+    print(f"Launch opts: {opts}")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, **_launch_opts())
+        browser = p.chromium.launch(headless=True, **opts)
         ctx = browser.new_context(storage_state=str(SESSION_FILE))
         page = ctx.new_page()
 
         print("Loading dashboard...")
         page.goto(EPOST_URL)
+        print(f"URL after goto: {page.url}")
 
         if "login" in page.url or "swissid" in page.url:
+            print(f"Page title: {page.title()}")
             browser.close()
             raise RuntimeError("Session expired — run: python sync.py login")
 
