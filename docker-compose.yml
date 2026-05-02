@@ -1,0 +1,16 @@
+services:
+  posty:
+    image: posty:latest
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - data:/data
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 30s
+
+volumes:
+  data:

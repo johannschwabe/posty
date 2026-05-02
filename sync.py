@@ -10,6 +10,7 @@ Two modes:
 import json
 import os
 import re
+import shutil
 import sys
 import urllib.parse
 from pathlib import Path
@@ -24,8 +25,16 @@ EPOST_URL = "https://app.epost.ch"
 PAPERLESS_URL = os.environ.get("PAPERLESS_URL", "http://localhost:8000")
 PAPERLESS_TOKEN = os.environ.get("PAPERLESS_TOKEN", "")
 
-SESSION_FILE = Path(__file__).parent / "session.json"
-STATE_FILE = Path(__file__).parent / "synced_letters.json"
+_data_dir = Path(os.environ.get("DATA_DIR", Path(__file__).parent))
+SESSION_FILE = _data_dir / "session.json"
+STATE_FILE = _data_dir / "synced_letters.json"
+
+def _launch_opts() -> dict:
+    """Use system Chromium if found (needed when Playwright's bundled build doesn't support the OS)."""
+    for name in ("chromium", "chromium-browser", "google-chrome-stable", "google-chrome"):
+        if path := shutil.which(name):
+            return {"executable_path": path}
+    return {}
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -45,7 +54,7 @@ def cmd_login():
     print("The browser will close automatically once you reach the ePost dashboard.\n")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=False, **_launch_opts())
         ctx = browser.new_context()
         page = ctx.new_page()
         page.goto(EPOST_URL)
@@ -163,32 +172,34 @@ def upload_to_paperless(pdf_bytes: bytes, filename: str, letter: dict):
 
 # ── Sync ──────────────────────────────────────────────────────────────────────
 
-def cmd_sync():
+def run_sync() -> tuple[list[dict], list[str]]:
+    """Core sync. Returns (new_letters, errors). Raises on fatal session errors."""
     if not SESSION_FILE.exists():
-        raise FileNotFoundError(f"No session found. Run first: python sync.py login")
+        raise FileNotFoundError("No session found. Run first: python sync.py login")
 
     synced = load_state()
+    new_letters: list[dict] = []
+    errors: list[str] = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, **_launch_opts())
         ctx = browser.new_context(storage_state=str(SESSION_FILE))
         page = ctx.new_page()
 
         print("Loading dashboard...")
         page.goto(EPOST_URL)
 
-        # If redirected to login, session has expired
         if "login" in page.url or "swissid" in page.url:
             browser.close()
             raise RuntimeError("Session expired — run: python sync.py login")
 
         print("Navigating to letterbox...")
         navigate_to_letterbox(page)
+        ctx.storage_state(path=str(SESSION_FILE))  # persist any token renewals
 
         letters = get_letters(page)
         print(f"Found {len(letters)} letter(s).")
 
-        new_count = 0
         for letter in letters:
             lid = letter["id"]
             if lid in synced:
@@ -204,21 +215,27 @@ def cmd_sync():
                 if PAPERLESS_TOKEN:
                     upload_to_paperless(pdf_bytes, filename, letter)
                 else:
-                    out = Path(__file__).parent / "downloads" / filename
+                    out = _data_dir / "downloads" / filename
                     out.parent.mkdir(exist_ok=True)
                     out.write_bytes(pdf_bytes)
                     print(f"    Saved locally: {out}")
 
                 synced.add(lid)
                 save_state(synced)
-                new_count += 1
+                new_letters.append(letter)
 
             except Exception as e:
                 print(f"    ERROR: {e}", file=sys.stderr)
+                errors.append(f"{label[:60]}: {e}")
 
         browser.close()
 
-    print(f"\nDone. {new_count} new letter(s) synced.")
+    return new_letters, errors
+
+
+def cmd_sync():
+    new_letters, errors = run_sync()
+    print(f"\nDone. {len(new_letters)} new letter(s) synced.")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
