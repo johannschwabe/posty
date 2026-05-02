@@ -184,6 +184,7 @@ def run_sync() -> tuple[list[dict], list[str]]:
     """Core sync. Returns (new_letters, errors). Raises on fatal session errors."""
     if not SESSION_FILE.exists():
         raise FileNotFoundError("No session found. Run first: python sync.py login")
+    print(f"Session file: {SESSION_FILE} ({SESSION_FILE.stat().st_size:,} bytes)")
 
     synced = load_state()
     new_letters: list[dict] = []

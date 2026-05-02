@@ -12,4 +12,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY sync.py bot.py ./
 
 ENV DATA_DIR=/data
+ENV PYTHONUNBUFFERED=1
 CMD ["python", "bot.py"]
