@@ -1,0 +1,6 @@
+.env
+session.json
+synced_letters.json
+downloads/
+__pycache__/
+.venv/
