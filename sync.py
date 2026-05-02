@@ -37,7 +37,7 @@ def _launch_opts() -> dict:
             opts["executable_path"] = path
             break
     if Path("/.dockerenv").exists():
-        opts["args"] = ["--no-sandbox"]
+        opts["args"] = ["--no-sandbox", "--disable-dev-shm-usage"]
     return opts
 
 # ── State ─────────────────────────────────────────────────────────────────────
