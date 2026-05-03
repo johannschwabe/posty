@@ -1,5 +1,6 @@
 .env
 session.json
+token_data.json
 synced_letters.json
 downloads/
 __pycache__/

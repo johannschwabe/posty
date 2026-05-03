@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -27,7 +28,10 @@ PAPERLESS_TOKEN = os.environ.get("PAPERLESS_TOKEN", "")
 
 _data_dir = Path(os.environ.get("DATA_DIR", Path(__file__).parent))
 SESSION_FILE = _data_dir / "session.json"
+TOKEN_FILE = _data_dir / "token_data.json"
 STATE_FILE = _data_dir / "synced_letters.json"
+
+KEYCLOAK_TOKEN_URL = "https://login.epost.ch/auth/realms/klara/protocol/openid-connect/token"
 
 def _launch_opts() -> dict:
     """Use system Chromium if found. Adds --no-sandbox when running inside Docker."""
@@ -43,6 +47,108 @@ def _launch_opts() -> dict:
         raise RuntimeError("No Chromium found in container. Install chromium via apt.")
     print(f"Chromium: {opts.get('executable_path', 'playwright-bundled')} args={opts.get('args', [])}")
     return opts
+
+# ── Keycloak token refresh ────────────────────────────────────────────────────
+
+def _attach_token_interceptor(page) -> dict:
+    """
+    Listen for Keycloak token endpoint calls on *page* and capture
+    refresh_token + client_id into the returned dict.
+    """
+    captured: dict = {}
+    pending: dict = {}  # url → client_id from the matching POST body
+
+    def on_request(request):
+        if "openid-connect/token" not in request.url or request.method != "POST":
+            return
+        try:
+            params = dict(urllib.parse.parse_qsl(request.post_data or ""))
+            if "client_id" in params:
+                pending[request.url] = params["client_id"]
+        except Exception:
+            pass
+
+    def on_response(response):
+        if "openid-connect/token" not in response.url or response.status != 200:
+            return
+        try:
+            data = response.json()
+            if "refresh_token" in data:
+                if response.url in pending:
+                    data["client_id"] = pending.pop(response.url)
+                captured.update(data)
+        except Exception:
+            pass
+
+    page.on("request", on_request)
+    page.on("response", on_response)
+    return captured
+
+
+def _try_refresh_session(ctx) -> bool:
+    """
+    If the KEYCLOAK_SESSION cookie is expired or within 2 h of expiry,
+    use the saved refresh_token to call the Keycloak token endpoint,
+    update the cookie expiry in *ctx*, and save the new refresh_token.
+    Returns True if a refresh was performed, False otherwise.
+    """
+    if not TOKEN_FILE.exists() or not SESSION_FILE.exists():
+        return False
+
+    try:
+        session_data = json.loads(SESSION_FILE.read_text())
+        kc_cookie = next(
+            (c for c in session_data["cookies"] if c["name"] == "KEYCLOAK_SESSION"),
+            None,
+        )
+        if kc_cookie is None:
+            return False
+
+        cookie_expiry = kc_cookie.get("expires", -1)
+        if cookie_expiry != -1 and cookie_expiry > time.time() + 7200:
+            return False  # plenty of time left, skip
+
+        token_data = json.loads(TOKEN_FILE.read_text())
+        refresh_token = token_data.get("refresh_token")
+        client_id = token_data.get("client_id")
+        if not refresh_token or not client_id:
+            return False
+
+        print("Refreshing Keycloak session via refresh_token...")
+        resp = httpx.post(
+            KEYCLOAK_TOKEN_URL,
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            print(f"  Token refresh failed: HTTP {resp.status_code} — {resp.text[:200]}")
+            TOKEN_FILE.unlink(missing_ok=True)  # stale token, remove it
+            return False
+
+        new_tokens = resp.json()
+        token_data.update(new_tokens)
+        TOKEN_FILE.write_text(json.dumps(token_data, indent=2))
+
+        # Extend the KEYCLOAK_SESSION cookie expiry so Playwright/Chromium
+        # actually sends it with requests again.
+        refresh_expires_in = new_tokens.get("refresh_expires_in") or 36000
+        new_expiry = time.time() + refresh_expires_in
+        updated = [
+            {**c, "expires": new_expiry}
+            for c in session_data["cookies"]
+            if c["name"] in ("KEYCLOAK_SESSION", "KEYCLOAK_SESSION_LEGACY")
+        ]
+        if updated:
+            ctx.add_cookies(updated)
+
+        hours = refresh_expires_in / 3600
+        print(f"  Session refreshed — cookie valid for another {hours:.1f}h.")
+        return True
+
+    except Exception as exc:
+        print(f"  Session refresh error: {exc}")
+        return False
+
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -65,12 +171,19 @@ def cmd_login():
         browser = p.chromium.launch(headless=False, **_launch_opts())
         ctx = browser.new_context()
         page = ctx.new_page()
+        token_capture = _attach_token_interceptor(page)
         page.goto(EPOST_URL)
 
         # Wait up to 5 minutes for user to complete login
         page.wait_for_url("**/app.epost.ch/**ch.klara.**", timeout=300_000)
+        page.wait_for_timeout(2000)  # let any in-flight token requests settle
         print("Login detected. Saving session...")
         ctx.storage_state(path=str(SESSION_FILE))
+        if token_capture.get("refresh_token"):
+            TOKEN_FILE.write_text(json.dumps(token_capture, indent=2))
+            print(f"Refresh token saved to {TOKEN_FILE}")
+        else:
+            print("Note: refresh token not captured — session renewal depends on browser cookie lifetime.")
         browser.close()
 
     print(f"Session saved to {SESSION_FILE}")
@@ -196,7 +309,12 @@ def run_sync() -> tuple[list[dict], list[str]]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, **opts)
         ctx = browser.new_context(storage_state=str(SESSION_FILE))
+
+        # Refresh Keycloak session cookie before navigating if near/past expiry.
+        _try_refresh_session(ctx)
+
         page = ctx.new_page()
+        token_capture = _attach_token_interceptor(page)
 
         print("Loading dashboard...")
         page.goto(EPOST_URL)
@@ -209,6 +327,14 @@ def run_sync() -> tuple[list[dict], list[str]]:
 
         print("Navigating to letterbox...")
         navigate_to_letterbox(page)
+        page.wait_for_timeout(500)  # let any in-flight token requests land
+
+        # Save newly captured refresh_token (the SPA exchanges auth codes each load).
+        if token_capture.get("refresh_token"):
+            existing = json.loads(TOKEN_FILE.read_text()) if TOKEN_FILE.exists() else {}
+            existing.update(token_capture)
+            TOKEN_FILE.write_text(json.dumps(existing, indent=2))
+
         ctx.storage_state(path=str(SESSION_FILE))  # persist any token renewals
 
         letters = get_letters(page)
